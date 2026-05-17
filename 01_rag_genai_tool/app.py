@@ -7,8 +7,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
@@ -35,7 +35,6 @@ def load_vectorstore():
             allow_dangerous_deserialization=True
         )
 
-    # Build from PDFs if vectorstore doesn't exist
     st.info("Building vector store from documents...")
     all_documents = []
     for filename in os.listdir("data/"):
@@ -55,35 +54,45 @@ def load_vectorstore():
     vectorstore.save_local("financial_vectorstore")
     return vectorstore
 
-# ── BUILD RAG CHAIN ───────────────────────────────────
+# ── BUILD RAG CHAIN (pure langchain_core, no langchain.chains) ───
 @st.cache_resource
 def load_chain():
     vectorstore = load_vectorstore()
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-
     llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
-    # Prompt that includes chat history for memory
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a financial analyst assistant.
 Answer questions about company financial reports accurately.
 Always mention which company you are referring to.
-If the answer isn't in the context, say so clearly.
-Do not make up numbers or facts.
+If the answer is not in the context below, say clearly 
+that you don't have that information. Never make up numbers.
 
-Context:
-{context}"""),
+Context: {context}"""),
         MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{input}")
+        ("human", "{question}")
     ])
 
-    chain = create_stuff_documents_chain(llm, prompt)
-    return create_retrieval_chain(retriever, chain)
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    # Pure LCEL chain — no langchain.chains imports needed
+    chain = (
+        {
+            "context": retriever | format_docs,
+            "question": RunnablePassthrough(),
+            "chat_history": RunnablePassthrough()
+        }
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    return chain, retriever
 
 # ── INITIALISE SESSION STATE ──────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
@@ -93,7 +102,7 @@ with st.sidebar:
     if os.path.exists("data/"):
         for f in os.listdir("data/"):
             if f.endswith(".pdf"):
-                st.markdown(f"- {f}")
+                st.markdown(f"- 📄 {f}")
     st.divider()
     if st.button("🗑️ Clear Conversation"):
         st.session_state.messages = []
@@ -105,7 +114,7 @@ with st.sidebar:
 
 # ── LOAD CHAIN ────────────────────────────────────────
 with st.spinner("Loading financial reports..."):
-    chain = load_chain()
+    chain, retriever = load_chain()
 st.success("Ready! Ask me anything about the reports.")
 
 # ── DISPLAY CHAT HISTORY ──────────────────────────────
@@ -125,22 +134,28 @@ if question := st.chat_input("Ask about the financial reports..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Analysing reports..."):
-            result = chain.invoke({
-                "input": question,
-                "chat_history": st.session_state.chat_history
-            })
-            answer = result["answer"]
+
+            # Get source documents separately for citation
+            source_docs = retriever.invoke(question)
             sources = set(
                 doc.metadata.get("source", "unknown")
-                for doc in result["context"]
+                for doc in source_docs
             )
+
+            # Run the chain
+            answer = chain.invoke({
+                "question": question,
+                "chat_history": st.session_state.chat_history,
+                "context": "\n\n".join(
+                    doc.page_content for doc in source_docs
+                )
+            })
 
         st.markdown(answer)
         with st.expander("📄 Sources"):
             for s in sources:
                 st.markdown(f"- `{s}`")
 
-    # Update chat history for memory
     st.session_state.chat_history.extend([
         HumanMessage(content=question),
         AIMessage(content=answer)
