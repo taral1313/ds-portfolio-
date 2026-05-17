@@ -22,15 +22,43 @@ st.divider()
 # ── LOAD VECTORSTORE + BUILD CHAIN ────────────────────
 @st.cache_resource
 def load_vectorstore():
-    embedder = OpenAIEmbeddings(model="text-embedding-3-small")
-    vectorstore = FAISS.load_local(
-        "financial_vectorstore",
-        embedder,
-        allow_dangerous_deserialization=True
-    )
-    return vectorstore
+    import os
+    from langchain_community.document_loaders import PyPDFLoader
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-vectorstore = load_vectorstore()
+    embedder = OpenAIEmbeddings(model="text-embedding-3-small")
+
+    # If vectorstore already exists on disk, just load it
+    if os.path.exists("financial_vectorstore"):
+        st.info("Loading existing vector store...")
+        vectorstore = FAISS.load_local(
+            "financial_vectorstore",
+            embedder,
+            allow_dangerous_deserialization=True
+        )
+        return vectorstore
+
+    # Otherwise build it from PDFs in data/ folder
+    st.info("Building vector store from documents...")
+    all_documents = []
+
+    for filename in os.listdir("data/"):
+        if filename.endswith(".pdf"):
+            loader = PyPDFLoader(os.path.join("data/", filename))
+            docs = loader.load()
+            for doc in docs:
+                doc.metadata["source"] = filename
+            all_documents.extend(docs)
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=700,
+        chunk_overlap=100
+    )
+    chunks = splitter.split_documents(all_documents)
+
+    vectorstore = FAISS.from_documents(chunks, embedder)
+    vectorstore.save_local("financial_vectorstore")
+    return vectorstore
 
 # ── MEMORY: lives in session_state so it persists ─────
 # Each user session gets its own memory object
