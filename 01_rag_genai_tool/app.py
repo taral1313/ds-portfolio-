@@ -1,10 +1,13 @@
 import streamlit as st
+import os
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.prompts import PromptTemplate
-from langchain.chains import ConversationalRetrievalChain
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
 
 load_dotenv()
 
