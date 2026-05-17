@@ -12,7 +12,12 @@ from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
-# ── PAGE CONFIG ───────────────────────────────────────
+# ── ABSOLUTE PATHS (works locally and on Streamlit Cloud) ──
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(APP_DIR, "data")
+VECTORSTORE_DIR = os.path.join(APP_DIR, "financial_vectorstore")
+
+# ── PAGE CONFIG ────────────────────────────────────────────
 st.set_page_config(
     page_title="Financial Report Analyser",
     page_icon="📊",
@@ -23,23 +28,24 @@ st.title("📊 Financial Report Analyser")
 st.markdown("Ask anything about the uploaded financial reports.")
 st.divider()
 
-# ── LOAD VECTORSTORE ──────────────────────────────────
+# ── LOAD VECTORSTORE ───────────────────────────────────────
 @st.cache_resource
 def load_vectorstore():
     embedder = OpenAIEmbeddings(model="text-embedding-3-small")
 
-    if os.path.exists("financial_vectorstore"):
+    if os.path.exists(VECTORSTORE_DIR):
         return FAISS.load_local(
-            "financial_vectorstore",
+            VECTORSTORE_DIR,
             embedder,
             allow_dangerous_deserialization=True
         )
 
     st.info("Building vector store from documents...")
     all_documents = []
-    for filename in os.listdir("data/"):
+
+    for filename in os.listdir(DATA_DIR):
         if filename.endswith(".pdf"):
-            loader = PyPDFLoader(os.path.join("data/", filename))
+            loader = PyPDFLoader(os.path.join(DATA_DIR, filename))
             docs = loader.load()
             for doc in docs:
                 doc.metadata["source"] = filename
@@ -51,10 +57,10 @@ def load_vectorstore():
     )
     chunks = splitter.split_documents(all_documents)
     vectorstore = FAISS.from_documents(chunks, embedder)
-    vectorstore.save_local("financial_vectorstore")
+    vectorstore.save_local(VECTORSTORE_DIR)
     return vectorstore
 
-# ── BUILD RAG CHAIN (pure langchain_core, no langchain.chains) ───
+# ── BUILD RAG CHAIN ────────────────────────────────────────
 @st.cache_resource
 def load_chain():
     vectorstore = load_vectorstore()
@@ -65,7 +71,7 @@ def load_chain():
         ("system", """You are a financial analyst assistant.
 Answer questions about company financial reports accurately.
 Always mention which company you are referring to.
-If the answer is not in the context below, say clearly 
+If the answer is not in the context below, say clearly
 that you don't have that information. Never make up numbers.
 
 Context: {context}"""),
@@ -76,7 +82,6 @@ Context: {context}"""),
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
-    # Pure LCEL chain — no langchain.chains imports needed
     chain = (
         {
             "context": retriever | format_docs,
@@ -90,17 +95,17 @@ Context: {context}"""),
 
     return chain, retriever
 
-# ── INITIALISE SESSION STATE ──────────────────────────
+# ── INITIALISE SESSION STATE ───────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# ── SIDEBAR ───────────────────────────────────────────
+# ── SIDEBAR ────────────────────────────────────────────────
 with st.sidebar:
     st.header("📁 Loaded Reports")
-    if os.path.exists("data/"):
-        for f in os.listdir("data/"):
+    if os.path.exists(DATA_DIR):
+        for f in os.listdir(DATA_DIR):
             if f.endswith(".pdf"):
                 st.markdown(f"- 📄 {f}")
     st.divider()
@@ -112,17 +117,17 @@ with st.sidebar:
     st.caption("Built by Taral Sarvagod")
     st.caption("Stack: LangChain · OpenAI · FAISS · Streamlit")
 
-# ── LOAD CHAIN ────────────────────────────────────────
+# ── LOAD CHAIN ─────────────────────────────────────────────
 with st.spinner("Loading financial reports..."):
     chain, retriever = load_chain()
 st.success("Ready! Ask me anything about the reports.")
 
-# ── DISPLAY CHAT HISTORY ──────────────────────────────
+# ── DISPLAY CHAT HISTORY ───────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ── CHAT INPUT ────────────────────────────────────────
+# ── CHAT INPUT ─────────────────────────────────────────────
 if question := st.chat_input("Ask about the financial reports..."):
 
     with st.chat_message("user"):
@@ -135,14 +140,12 @@ if question := st.chat_input("Ask about the financial reports..."):
     with st.chat_message("assistant"):
         with st.spinner("Analysing reports..."):
 
-            # Get source documents separately for citation
             source_docs = retriever.invoke(question)
             sources = set(
                 doc.metadata.get("source", "unknown")
                 for doc in source_docs
             )
 
-            # Run the chain
             answer = chain.invoke({
                 "question": question,
                 "chat_history": st.session_state.chat_history,
