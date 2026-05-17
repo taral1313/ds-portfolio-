@@ -7,12 +7,10 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
-# ── ABSOLUTE PATHS (works locally and on Streamlit Cloud) ──
+# ── ABSOLUTE PATHS ─────────────────────────────────────────
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_DIR, "data")
 VECTORSTORE_DIR = os.path.join(APP_DIR, "financial_vectorstore")
@@ -60,40 +58,11 @@ def load_vectorstore():
     vectorstore.save_local(VECTORSTORE_DIR)
     return vectorstore
 
-# ── BUILD RAG CHAIN ────────────────────────────────────────
+# ── LOAD RETRIEVER ─────────────────────────────────────────
 @st.cache_resource
-def load_chain():
+def load_retriever():
     vectorstore = load_vectorstore()
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-    llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a financial analyst assistant.
-Answer questions about company financial reports accurately.
-Always mention which company you are referring to.
-If the answer is not in the context below, say clearly
-that you don't have that information. Never make up numbers.
-
-Context: {context}"""),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{question}")
-    ])
-
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-
-    chain = (
-        {
-            "context": retriever | format_docs,
-            "question": RunnablePassthrough(),
-            "chat_history": RunnablePassthrough()
-        }
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-    return chain, retriever
+    return vectorstore.as_retriever(search_kwargs={"k": 4})
 
 # ── INITIALISE SESSION STATE ───────────────────────────────
 if "messages" not in st.session_state:
@@ -117,9 +86,9 @@ with st.sidebar:
     st.caption("Built by Taral Sarvagod")
     st.caption("Stack: LangChain · OpenAI · FAISS · Streamlit")
 
-# ── LOAD CHAIN ─────────────────────────────────────────────
+# ── LOAD ───────────────────────────────────────────────────
 with st.spinner("Loading financial reports..."):
-    chain, retriever = load_chain()
+    retriever = load_retriever()
 st.success("Ready! Ask me anything about the reports.")
 
 # ── DISPLAY CHAT HISTORY ───────────────────────────────────
@@ -140,19 +109,37 @@ if question := st.chat_input("Ask about the financial reports..."):
     with st.chat_message("assistant"):
         with st.spinner("Analysing reports..."):
 
+            # Retrieve relevant chunks
             source_docs = retriever.invoke(question)
+            context_text = "\n\n".join(
+                doc.page_content for doc in source_docs
+            )
             sources = set(
                 doc.metadata.get("source", "unknown")
                 for doc in source_docs
             )
 
-            answer = chain.invoke({
-                "question": question,
-                "chat_history": st.session_state.chat_history,
-                "context": "\n\n".join(
-                    doc.page_content for doc in source_docs
-                )
-            })
+            # Build prompt and call LLM directly
+            llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are a financial analyst assistant.
+Answer questions about company financial reports accurately.
+Always mention which company you are referring to.
+If the answer is not in the context below, say clearly
+that you don't have that information. Never make up numbers.
+
+Context: {context}"""),
+                MessagesPlaceholder(variable_name="chat_history"),
+                ("human", "{question}")
+            ])
+
+            messages = prompt.format_messages(
+                context=context_text,
+                chat_history=st.session_state.chat_history,
+                question=question
+            )
+            response = llm.invoke(messages)
+            answer = response.content
 
         st.markdown(answer)
         with st.expander("📄 Sources"):
