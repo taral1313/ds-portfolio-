@@ -2,9 +2,9 @@ import streamlit as st
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
-import os
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
 
 load_dotenv()
 
@@ -15,93 +15,96 @@ st.set_page_config(
     layout="centered"
 )
 
-# ── HEADER ────────────────────────────────────────────
 st.title("📊 Financial Report Analyser")
-st.markdown("Ask any question about the uploaded financial reports.")
+st.markdown("Ask anything about the uploaded financial reports.")
 st.divider()
 
-# ── LOAD VECTORSTORE (cached so it only loads once) ───
+# ── LOAD VECTORSTORE + BUILD CHAIN ────────────────────
 @st.cache_resource
-def load_qa_chain():
+def load_vectorstore():
     embedder = OpenAIEmbeddings(model="text-embedding-3-small")
     vectorstore = FAISS.load_local(
         "financial_vectorstore",
         embedder,
         allow_dangerous_deserialization=True
     )
+    return vectorstore
 
-    prompt_template = """
-You are a financial analyst assistant. Answer questions 
-about company financial reports accurately and concisely.
-Always mention which company you are referring to.
-If the information isn't in the context, say so clearly.
-Do not make up numbers or facts.
+vectorstore = load_vectorstore()
 
-Context:
-{context}
-
-Question: {question}
-
-Answer:"""
-
-    prompt = PromptTemplate(
-        template=prompt_template,
-        input_variables=["context", "question"]
+# ── MEMORY: lives in session_state so it persists ─────
+# Each user session gets its own memory object
+if "memory" not in st.session_state:
+    st.session_state.memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True,
+        output_key="answer"
     )
 
-    llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
-
-    chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 4}),
-        chain_type_kwargs={"prompt": prompt},
-        return_source_documents=True
-    )
-    return chain
-
-# ── LOAD THE CHAIN ────────────────────────────────────
-with st.spinner("Loading financial reports..."):
-    qa_chain = load_qa_chain()
-st.success("Ready! Ask me anything about the reports.")
-
-# ── CHAT HISTORY ──────────────────────────────────────
-# Store conversation in session so it persists while app runs
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display previous messages
+# ── BUILD CHAIN WITH MEMORY ───────────────────────────
+# ConversationalRetrievalChain automatically includes
+# chat history in every prompt it sends to GPT
+llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+
+qa_chain = ConversationalRetrievalChain.from_llm(
+    llm=llm,
+    retriever=vectorstore.as_retriever(search_kwargs={"k": 4}),
+    memory=st.session_state.memory,
+    return_source_documents=True,
+    verbose=False
+)
+
+# ── SIDEBAR ───────────────────────────────────────────
+with st.sidebar:
+    st.header("📁 Loaded Reports")
+    st.markdown("- Amazon Annual Report 2023")
+    st.markdown("- *(add more PDFs to data/ folder)*")
+    st.divider()
+
+    # Clear conversation button
+    if st.button("🗑️ Clear Conversation"):
+        st.session_state.messages = []
+        st.session_state.memory.clear()
+        st.rerun()
+
+    st.divider()
+    st.caption("Built by Taral Sarvagod")
+    st.caption("Stack: LangChain · OpenAI · FAISS · Streamlit")
+
+# ── DISPLAY CHAT HISTORY ──────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 # ── CHAT INPUT ────────────────────────────────────────
-if question := st.chat_input("Ask a question about the financial reports..."):
+if question := st.chat_input("Ask about the financial reports..."):
 
-    # Show user question
+    # Show user question immediately
     with st.chat_message("user"):
         st.markdown(question)
-    st.session_state.messages.append({"role": "user", "content": question})
+    st.session_state.messages.append({
+        "role": "user",
+        "content": question
+    })
 
-    # Get answer
+    # Get answer with memory
     with st.chat_message("assistant"):
-        with st.spinner("Searching reports..."):
-            result = qa_chain.invoke({"query": question})
-            answer = result["result"]
-
-            # Get source documents
+        with st.spinner("Analysing reports..."):
+            result = qa_chain.invoke({"question": question})
+            answer = result["answer"]
             sources = set(
                 doc.metadata.get("source", "unknown")
                 for doc in result["source_documents"]
             )
 
-            # Display answer
-            st.markdown(answer)
+        st.markdown(answer)
 
-            # Display sources in a nice expander
-            with st.expander("📄 Sources used"):
-                for source in sources:
-                    st.markdown(f"- `{source}`")
+        with st.expander("📄 Sources"):
+            for s in sources:
+                st.markdown(f"- `{s}`")
 
     st.session_state.messages.append({
         "role": "assistant",
